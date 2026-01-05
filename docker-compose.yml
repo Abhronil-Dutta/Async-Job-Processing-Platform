@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:latest
+    container_name: jobs-postgres
+    environment:
+      POSTGRES_USER: jobs_user
+      POSTGRES_PASSWORD: jobs_pass
+      POSTGRES_DB: jobs_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+volumes:
+  pgdata:
