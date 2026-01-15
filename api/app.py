@@ -1,10 +1,10 @@
 from fastapi import FastAPI, HTTPException
 from sqlalchemy import text
-from db import SessionLocal
+from api.db import SessionLocal
 
 from pydantic import BaseModel
 from sqlalchemy import text
-import json
+import json 
 
 app = FastAPI()
 

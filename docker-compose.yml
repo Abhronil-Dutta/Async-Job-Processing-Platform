@@ -16,24 +16,59 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:latest
+    container_name: jobs-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   api:
     build: 
       context: .
       dockerfile: api/Dockerfile
     environment:
       DATABASE_URL: postgresql://jobs_user:jobs_pass@postgres:5432/jobs_db
+      REDIS_URL: redis://redis:6379/0
+      PYTHONPATH: /app
     ports:
       - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
-      - ./api:/app
+      - .:/app # Mount the entire project for the api
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: api/Dockerfile # Re-using api's Dockerfile for now, assuming similar python environment
+    environment:
+      DATABASE_URL: postgresql://jobs_user:jobs_pass@postgres:5432/jobs_db
+      REDIS_URL: redis://redis:6379/0
+      REDIS_PENDING_LIST: pending_jobs
+      REDIS_PROCESSING_LIST: processing_jobs
+      WORKER_LEASE_SECONDS: 60
+      PYTHONPATH: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app # Mount the entire project for the worker
+    command: python workers/workers.py # Command to run the worker
 
 volumes:
   pgdata:
