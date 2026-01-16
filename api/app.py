@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from sqlalchemy import text
 from api.db import SessionLocal
+from api.redis_client import add_job_to_pending_list
 
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -50,8 +51,11 @@ def create_jon(job: JobCreate):
         ).fetchone()
         db.commit()
 
+        job_id = str(result.id)
+        add_job_to_pending_list(job_id)
+
         return {
-            "job_id": str(result.id),
+            "job_id": job_id,
             "status": result.status
         }
     finally:

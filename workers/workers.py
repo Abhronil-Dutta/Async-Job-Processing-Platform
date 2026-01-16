@@ -2,10 +2,11 @@ import os
 import time
 from datetime import datetime, timedelta
 
-from Joblib.utils import brpoplpush_job
 from api.db import SessionLocal, engine
 from Joblib.models import Job, Base
 import logging
+from api.redis_client import move_job_to_processing_list
+
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -24,7 +25,7 @@ def worker_loop():
         try:
             # Atomically move a job from pending to processing list
             logging.info(f"Attempting to fetch job from {PENDING_LIST}...")
-            job_id = brpoplpush_job(PENDING_LIST, PROCESSING_LIST, timeout=30)
+            job_id = move_job_to_processing_list(timeout=WORKER_LEASE_SECONDS)
 
             if job_id:
                 logging.info(f"Fetched job_id: {job_id}. Updating status in DB...")
