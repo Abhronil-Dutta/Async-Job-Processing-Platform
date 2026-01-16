@@ -53,7 +53,7 @@ services:
   worker:
     build:
       context: .
-      dockerfile: api/Dockerfile # Re-using api's Dockerfile for now, assuming similar python environment
+      dockerfile: workers/Dockerfile
     environment:
       DATABASE_URL: postgresql://jobs_user:jobs_pass@postgres:5432/jobs_db
       REDIS_URL: redis://redis:6379/0
