@@ -1,0 +1,6 @@
+# JOB TYPES
+
+- NORMAL
+- DELAY
+- FAIL
+

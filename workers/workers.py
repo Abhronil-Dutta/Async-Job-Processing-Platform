@@ -1,12 +1,13 @@
 import os
 import time
 from datetime import datetime, timedelta
+import threading
+import logging
 
 from api.db import SessionLocal, engine
 from Joblib.models import Job, Base
-import logging
 from api.redis_client import move_job_to_processing_list
-
+from Joblib.job import normal_job_function, bigger_job_function, definite_fail_job_function, anything_else
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -16,63 +17,88 @@ Base.metadata.create_all(bind=engine)
 # Configuration
 PENDING_LIST = os.getenv("REDIS_PENDING_LIST", "pending_jobs")
 PROCESSING_LIST = os.getenv("REDIS_PROCESSING_LIST", "processing_jobs")
-WORKER_LEASE_SECONDS = int(os.getenv("WORKER_LEASE_SECONDS", "60")) # 60 Seconds
+WORKER_LEASE_SECONDS = int(os.getenv("WORKER_LEASE_SECONDS", "60"))  # 60 Seconds
+LEASE_EXTENSION_SECONDS = 30
+LEASE_RENEW_THRESHOLD_SECONDS = 10  # Renew lease if it's about to expire in 10 seconds
+
+JOB_TYPE_MAP = {
+    "NORMAL": normal_job_function,
+    "DELAY": bigger_job_function,
+    "FAIL": definite_fail_job_function,
+}
+
+def run_job_in_thread(job_func, result_dict):
+    """Executes the job function in a thread and captures the outcome."""
+    try:
+        result_dict['result'] = job_func()
+        result_dict['exception'] = None
+    except Exception as e:
+        result_dict['result'] = None
+        result_dict['exception'] = e
 
 def worker_loop():
     logging.info("Worker started. Listening for jobs...")
     while True:
         job_id = None
+        db = None
         try:
-            # Atomically move a job from pending to processing list
+            # Atomically move a job from pending to processing list, blocking indefinitely.
             logging.info(f"Attempting to fetch job from {PENDING_LIST}...")
-            job_id = move_job_to_processing_list(timeout=WORKER_LEASE_SECONDS)
+            job_id = move_job_to_processing_list(timeout=0)
 
             if job_id:
-                logging.info(f"Fetched job_id: {job_id}. Updating status in DB...")
+                logging.info(f"Fetched job_id: {job_id}. Processing job...")
                 db = SessionLocal()
-                try:
-                    job = db.query(Job).filter(Job.id == job_id).first()
-                    if job:
-                        job.status = "RUNNING"
-                        job.visibility_deadline = datetime.now() + timedelta(seconds=WORKER_LEASE_SECONDS)
-                        db.commit()
-                        db.refresh(job)
-                        logging.info(f"Job {job_id} status updated to RUNNING with deadline {job.visibility_deadline}.")
+                job = db.query(Job).filter(Job.id == job_id).first()
+                if job:
+                    job.status = "RUNNING"
+                    job.visibility_deadline = datetime.now() + timedelta(seconds=WORKER_LEASE_SECONDS)
+                    db.commit()
+                    db.refresh(job)
+                    logging.info(f"Job {job_id} status updated to RUNNING with deadline {job.visibility_deadline}.")
 
-                        # Here you would typically execute the job
-                        logging.info(f"Simulating execution for job {job_id}...")
-                        time.sleep(10) # Simulate work.. Later to be replaced by the different jobs in job.py
+                    job_function = JOB_TYPE_MAP.get(job.type, anything_else)
+                    logging.info(f"Executing job {job_id} of type {job.type} with function {job_function.__name__}")
 
-                        # For now, let's assume successful completion and move it out of processing
-                        # In a real scenario, this would be more complex with success/failure handling
-                        # and potentially moving to a 'completed' or 'failed' list.
-                        # For this iteration, we'll just mark it as completed directly.
-                        job.status = "COMPLETED"
-                        db.commit()
-                        logging.info(f"Job {job_id} marked as COMPLETED.")
-                        # Remove from processing list (this is a simplified approach, a real system
-                        # might have a separate mechanism for acknowledging completion and removing)
-                        # For now, let's just let it stay in processing and rely on its status
-                        # to indicate it's done.
+                    result_dict = {}
+                    job_thread = threading.Thread(target=run_job_in_thread, args=(job_function, result_dict))
+                    job_thread.start()
 
+                    # Monitor the job thread and extend the lease if necessary.
+                    while job_thread.is_alive():
+                        # Wait for a short interval before checking again.
+                        job_thread.join(timeout=5)
+                        
+                        if datetime.now() + timedelta(seconds=LEASE_RENEW_THRESHOLD_SECONDS) > job.visibility_deadline:
+                            job.visibility_deadline += timedelta(seconds=LEASE_EXTENSION_SECONDS)
+                            db.commit()
+                            logging.info(f"Renewed lease for job {job_id}. New deadline: {job.visibility_deadline}")
+
+                    # Job has finished, get the outcome.
+                    exception = result_dict.get('exception')
+
+                    if exception:
+                        logging.error(f"Job {job_id} failed: {exception}")
+                        job.status = "FAILED"
                     else:
-                        logging.warning(f"Job {job_id} not found in database. It might have been processed by another worker or removed.")
-                        # If job not found, it might be a stale entry in Redis or already processed.
-                        # We should ideally remove it from processing_list here, but brpoplpush doesn't
-                        # return enough info to safely remove it without id. For now, rely on
-                        # monitoring to clean up stale entries.
-                except Exception as e:
-                    db.rollback()
-                    logging.error(f"Error updating job {job_id} in DB: {e}")
-                finally:
-                    db.close()
-            else:
-                logging.info("No jobs in pending_jobs. Waiting...")
+                        logging.info(f"Job {job_id} completed successfully.")
+                        job.status = "COMPLETED"
+                    
+                    db.commit()
+                    logging.info(f"Job {job_id} status updated to {job.status}.")
+
+                else:
+                    logging.warning(f"Job {job_id} not found in database.")
+        
         except Exception as e:
-            logging.error(f"An unexpected error occurred in worker loop: {e}")
-            if job_id:
-                logging.warning(f"Job {job_id} was being processed when error occurred. It might be stuck in {PROCESSING_LIST}.")
-            time.sleep(5) # Wait a bit before retrying after an error
+            if db:
+                db.rollback()
+            logging.error(f"An error occurred in worker loop for job {job_id}: {e}", exc_info=True)
+            time.sleep(5)  # Wait before retrying.
+        
+        finally:
+            if db:
+                db.close()
 
 if __name__ == "__main__":
     worker_loop()

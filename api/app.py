@@ -1,11 +1,10 @@
 from fastapi import FastAPI, HTTPException
-from sqlalchemy import text
-from api.db import SessionLocal
-from api.redis_client import add_job_to_pending_list
-
 from pydantic import BaseModel
 from sqlalchemy import text
-import json 
+
+from api.db import SessionLocal
+from api.redis_client import add_job_to_pending_list
+from Joblib.models import Job
 
 app = FastAPI()
 
@@ -22,42 +21,37 @@ def health():
 @app.get("/db_check")
 def db_check():
     db = SessionLocal()
-
     try:
         result = db.execute(text("SELECT 1")).scalar()
-        return {"db":"connected",
-                "result": result
-                }
+        return {"db": "connected", "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"failed to get database {e}")
     finally:
         db.close()
 
-@app.post("/jobs")
-def create_jon(job: JobCreate):
+@app.post("/jobs", status_code=201)
+def create_job(job_data: JobCreate):
     db = SessionLocal()
     try:
-        query = text("""
-            INSERT INTO jobs(job_type, payload, max_attempts)
-            VALUES (:job_type, :payload, :max_attemps)
-            RETURNING id, status
-
-        """)
-        result = db.execute(query, {
-            "job_type": job.job_type,
-            "payload": json.dumps(job.payload),
-            "max_attemps": job.max_attempts,
-        },
-        ).fetchone()
+        new_job = Job(
+            job_type=job_data.job_type,
+            payload=job_data.payload,
+            max_attempts=job_data.max_attempts
+        )
+        db.add(new_job)
         db.commit()
+        db.refresh(new_job)
 
-        job_id = str(result.id)
+        job_id = str(new_job.id)
         add_job_to_pending_list(job_id)
 
         return {
             "job_id": job_id,
-            "status": result.status
+            "status": new_job.status
         }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to create job: {e}")
     finally:
         db.close()
 
